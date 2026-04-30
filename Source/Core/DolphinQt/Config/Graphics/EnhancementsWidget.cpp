@@ -155,6 +155,8 @@ void EnhancementsWidget::CreateWidgets()
   m_widescreen_hack =
       new ConfigBool(tr("Widescreen Hack"), Config::GFX_WIDESCREEN_HACK, m_game_layer);
   m_disable_fog = new ConfigBool(tr("Disable Fog"), Config::GFX_DISABLE_FOG, m_game_layer);
+  m_disable_shadows =
+      new ConfigBool(tr("Disable Shadows"), Config::GFX_DISABLE_SHADOWS, m_game_layer);
   m_force_24bit_color =
       new ConfigBool(tr("Force 24-Bit Color"), Config::GFX_ENHANCE_FORCE_TRUE_COLOR, m_game_layer);
   m_disable_copy_filter = new ConfigBool(tr("Disable Copy Filter"),
@@ -199,11 +201,14 @@ void EnhancementsWidget::CreateWidgets()
   ++row;
 
   enhancements_layout->addWidget(m_disable_fog, row, 0);
-  enhancements_layout->addWidget(m_arbitrary_mipmap_detection, row, 1, 1, -1);
+  enhancements_layout->addWidget(m_disable_shadows, row, 1, 1, -1);
   ++row;
 
   enhancements_layout->addWidget(m_disable_copy_filter, row, 0);
-  enhancements_layout->addWidget(m_hdr, row, 1, 1, -1);
+  enhancements_layout->addWidget(m_arbitrary_mipmap_detection, row, 1, 1, -1);
+  ++row;
+
+  enhancements_layout->addWidget(m_hdr, row, 0, 1, -1);
   ++row;
 
   // Stereoscopy
@@ -520,6 +525,11 @@ void EnhancementsWidget::AddDescriptions()
                  "detail.<br><br>Disabling fog will break some games which rely on proper fog "
                  "emulation.<br><br><dolphin_emphasis>If unsure, leave this "
                  "unchecked.</dolphin_emphasis>");
+  static const char TR_DISABLE_SHADOWS_DESCRIPTION[] = QT_TR_NOOP(
+      "Skips draw calls that look like projected shadow passes.<br><br>This can make 3D scene "
+      "capture cleaner and can remove distracting dark blobs in some games, but it may also hide "
+      "other dark translucent effects.<br><br><dolphin_emphasis>If unsure, leave this unchecked."
+      "</dolphin_emphasis>");
   static const char TR_3D_MODE_DESCRIPTION[] = QT_TR_NOOP(
       "Selects the stereoscopic 3D mode. Stereoscopy allows a better feeling "
       "of depth if the necessary hardware is present. Heavily decreases "
@@ -593,6 +603,8 @@ void EnhancementsWidget::AddDescriptions()
   m_widescreen_hack->SetDescription(tr(TR_WIDESCREEN_HACK_DESCRIPTION));
 
   m_disable_fog->SetDescription(tr(TR_REMOVE_FOG_DESCRIPTION));
+
+  m_disable_shadows->SetDescription(tr(TR_DISABLE_SHADOWS_DESCRIPTION));
 
   m_force_24bit_color->SetDescription(tr(TR_FORCE_24BIT_DESCRIPTION));
 

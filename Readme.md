@@ -6,6 +6,7 @@ This fork adds 3D screenshot capture support to Dolphin.
 
 - Added a 3D screenshot command under `Emulation > Take 3D Screenshot`.
 - Added a `Take 3D Screenshot` hotkey action with the default shortcut `Ctrl+F9`.
+- Added a `Disable Shadows` graphics enhancement toggle.
 - Captures the next available frame of perspective 3D geometry from Dolphin's native vertex stream.
 - Writes captures as Wavefront OBJ files with matching MTL material files.
 - Exports referenced texture images as PNG files when texture data is available.
@@ -27,3 +28,5 @@ The OBJ output includes vertex positions, normals, texture coordinates, vertex c
 ### Notes
 
 This feature is intended for extracting visible 3D scene geometry from supported games. Orthographic draws, UI elements, and frames with no captured 3D geometry are skipped.
+
+The `Disable Shadows` option skips draw calls that match common projected shadow rendering patterns. It can help produce cleaner captures, but it may also remove other dark translucent effects in some games.

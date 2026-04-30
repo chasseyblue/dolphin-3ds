@@ -53,6 +53,7 @@ private:
   ConfigBool* m_per_pixel_lighting;
   ConfigBool* m_widescreen_hack;
   ConfigBool* m_disable_fog;
+  ConfigBool* m_disable_shadows;
   ConfigBool* m_force_24bit_color;
   ConfigBool* m_disable_copy_filter;
   ConfigBool* m_arbitrary_mipmap_detection;

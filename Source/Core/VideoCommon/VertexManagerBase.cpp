@@ -316,6 +316,84 @@ void Capture3DScreenshotDraw(const u8* vertex_buffer, const PortableVertexDeclar
     break;
   }
 }
+
+bool HasShadowBlendMode()
+{
+  if (!bpmem.blendmode.color_update || bpmem.blendmode.logic_op_enable ||
+      !bpmem.blendmode.blend_enable || bpmem.blendmode.subtract)
+  {
+    return false;
+  }
+
+  const SrcBlendFactor src_factor = bpmem.blendmode.src_factor.Value();
+  const DstBlendFactor dst_factor = bpmem.blendmode.dst_factor.Value();
+
+  if (src_factor == SrcBlendFactor::Zero && dst_factor == DstBlendFactor::SrcClr)
+    return true;
+
+  if (src_factor == SrcBlendFactor::SrcAlpha &&
+      (dst_factor == DstBlendFactor::InvSrcAlpha || dst_factor == DstBlendFactor::One))
+  {
+    return true;
+  }
+
+  if (src_factor == SrcBlendFactor::One && dst_factor == DstBlendFactor::InvSrcAlpha)
+    return true;
+
+  return false;
+}
+
+bool UsesShadowDepthMode()
+{
+  return bpmem.zmode.test_enable && !bpmem.zmode.update_enable;
+}
+
+bool HasShadowVertexColor(const u8* vertex_buffer, const PortableVertexDeclaration& decl,
+                          u32 vertex_count, std::span<const u16> indices)
+{
+  if (!decl.colors[0].enable)
+    return true;
+
+  const std::size_t sample_count = std::min<std::size_t>(indices.size(), 24);
+  if (sample_count == 0)
+    return false;
+
+  u32 dark_or_translucent_count = 0;
+  for (std::size_t i = 0; i < sample_count; ++i)
+  {
+    const u16 index = indices[i];
+    if (index == PRIMITIVE_RESTART_INDEX || index >= vertex_count)
+      continue;
+
+    const u8* vertex = vertex_buffer + index * decl.stride;
+    const u8 red = ReadU8Attribute(vertex, decl.colors[0], 0, 255);
+    const u8 green = ReadU8Attribute(vertex, decl.colors[0], 1, 255);
+    const u8 blue = ReadU8Attribute(vertex, decl.colors[0], 2, 255);
+    const u8 alpha = ReadU8Attribute(vertex, decl.colors[0], 3, 255);
+    const u32 brightness = static_cast<u32>(red) + green + blue;
+    if (brightness <= 240 || alpha <= 224)
+      ++dark_or_translucent_count;
+  }
+
+  return dark_or_translucent_count * 2 >= sample_count;
+}
+
+bool IsLikelyShadowDraw(const u8* vertex_buffer, const PortableVertexDeclaration& decl,
+                        u32 vertex_count, std::span<const u16> indices,
+                        PrimitiveType primitive_type)
+{
+  if (!g_ActiveConfig.bDisableShadows)
+    return false;
+
+  if (primitive_type != PrimitiveType::Triangles && primitive_type != PrimitiveType::TriangleStrip)
+    return false;
+
+  if (!vertex_buffer || vertex_count == 0 || indices.empty() || decl.stride <= 0)
+    return false;
+
+  return UsesShadowDepthMode() && HasShadowBlendMode() &&
+         HasShadowVertexColor(vertex_buffer, decl, vertex_count, indices);
+}
 }  // namespace
 
 // GX primitive -> RenderState primitive, no primitive restart
@@ -919,6 +997,12 @@ void VertexManagerBase::Flush()
     if (!skip)
     {
       const PortableVertexDeclaration vertex_declaration = vertex_format->GetVertexDeclaration();
+      const u32 num_vertices = vertex_declaration.stride > 0 ?
+                                   static_cast<u32>((m_cur_buffer_pointer - m_base_buffer_pointer) /
+                                                    vertex_declaration.stride) :
+                                   0;
+      const std::span<const u16> indices(m_index_generator.GetIndexBufferStart(), num_indices);
+
       if (vertex_declaration.stride > 0)
       {
         u32 material_index = 0;
@@ -933,15 +1017,16 @@ void VertexManagerBase::Flush()
               ThreeDScreenshot::AddTextureMaterial(*loaded_textures[0]->texture, texture_name);
         }
 
-        const u32 num_vertices = static_cast<u32>((m_cur_buffer_pointer - m_base_buffer_pointer) /
-                                                  vertex_declaration.stride);
         Capture3DScreenshotDraw(m_base_buffer_pointer, vertex_declaration, num_vertices,
-                                material_index,
-                                std::span<const u16>(m_index_generator.GetIndexBufferStart(),
-                                                     num_indices),
-                                m_current_primitive_type);
+                                material_index, indices, m_current_primitive_type);
       }
 
+      skip = IsLikelyShadowDraw(m_base_buffer_pointer, vertex_declaration, num_vertices, indices,
+                                m_current_primitive_type);
+    }
+
+    if (!skip)
+    {
       UpdatePipelineConfig();
       UpdatePipelineObject();
       if (m_current_pipeline_object)
