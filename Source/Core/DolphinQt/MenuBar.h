@@ -73,6 +73,7 @@ signals:
   void Fullscreen();
   void FrameAdvance();
   void Screenshot();
+  void ThreeDScreenshot();
   void StartNetPlay();
   void BrowseNetPlay();
   void StateLoad();
@@ -245,6 +246,7 @@ private:
   QAction* m_fullscreen_action;
   QAction* m_frame_advance_action;
   QAction* m_screenshot_action;
+  QAction* m_3d_screenshot_action;
   QAction* m_boot_sysmenu;
   QMenu* m_state_load_menu;
   QMenu* m_state_save_menu;

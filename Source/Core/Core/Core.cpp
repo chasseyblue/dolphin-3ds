@@ -88,6 +88,7 @@
 #include "VideoCommon/FrameDumper.h"
 #include "VideoCommon/OnScreenDisplay.h"
 #include "VideoCommon/PerformanceMetrics.h"
+#include "VideoCommon/ThreeDScreenshot.h"
 #include "VideoCommon/VideoBackendBase.h"
 #include "VideoCommon/VideoEvents.h"
 
@@ -781,6 +782,47 @@ void SaveScreenShot(std::string_view name)
 {
   const Core::CPUThreadGuard guard(Core::System::GetInstance());
   g_frame_dumper->SaveScreenshot(fmt::format("{}{}.png", GenerateScreenshotFolderPath(), name));
+}
+
+static std::string Generate3DScreenshotFolderPath()
+{
+  const std::string& game_id = SConfig::GetInstance().GetGameID();
+  std::string path = File::GetUserPath(D_DUMPOBJECTS_IDX) + game_id + DIR_SEP_CHR;
+
+  if (!File::CreateFullPath(path))
+    path = File::GetUserPath(D_DUMPOBJECTS_IDX);
+
+  return path;
+}
+
+static std::optional<std::string> Generate3DScreenshotName()
+{
+  const std::string path_prefix =
+      Generate3DScreenshotFolderPath() + SConfig::GetInstance().GetGameID();
+
+  const std::time_t cur_time = std::time(nullptr);
+  const auto local_time = Common::LocalTime(cur_time);
+  if (!local_time)
+    return std::nullopt;
+  const std::string base_name =
+      fmt::format("{}_3d_{:%Y-%m-%d_%H-%M-%S}", path_prefix, *local_time);
+
+  std::string name = fmt::format("{}.obj", base_name);
+  if (File::Exists(name))
+  {
+    for (u32 i = 1; File::Exists(name = fmt::format("{}_{}.obj", base_name, i)); ++i)
+      ;
+  }
+
+  return name;
+}
+
+void Save3DScreenShot()
+{
+  const Core::CPUThreadGuard guard(Core::System::GetInstance());
+  std::optional<std::string> name = Generate3DScreenshotName();
+  if (name)
+    ThreeDScreenshot::Request(*name);
 }
 
 static bool PauseAndLock(Core::System& system)

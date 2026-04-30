@@ -19,6 +19,7 @@
 #include "VideoCommon/FramebufferManager.h"
 #include "VideoCommon/OnScreenUI.h"
 #include "VideoCommon/PostProcessing.h"
+#include "VideoCommon/ThreeDScreenshot.h"
 #include "VideoCommon/VertexManagerBase.h"
 #include "VideoCommon/VideoConfig.h"
 #include "VideoCommon/VideoEvents.h"
@@ -851,7 +852,10 @@ void Presenter::Present(PresentInfo* present_info)
   m_present_count++;
 
   if (g_gfx->IsHeadless() || (!m_onscreen_ui && !m_xfb_entry))
+  {
+    ThreeDScreenshot::EndFrame();
     return;
+  }
 
   if (!g_gfx->SupportsUtilityDrawing())
   {
@@ -865,6 +869,7 @@ void Presenter::Present(PresentInfo* present_info)
       // Due to depending on guest state, we need to call this every frame.
       SetSuggestedWindowSize(m_xfb_rect.GetWidth(), m_xfb_rect.GetHeight());
     }
+    ThreeDScreenshot::EndFrame();
     return;
   }
 
@@ -925,6 +930,7 @@ void Presenter::Present(PresentInfo* present_info)
     m_onscreen_ui->BeginImGuiFrame(m_backbuffer_width, m_backbuffer_height);
 
   g_gfx->EndUtilityDrawing();
+  ThreeDScreenshot::EndFrame();
 }
 
 TimePoint Presenter::GetUpdatedPresentationTime(TimePoint intended_presentation_time)

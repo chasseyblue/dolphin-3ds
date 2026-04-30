@@ -5,7 +5,10 @@
 
 #include <array>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <span>
+#include <vector>
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
@@ -36,6 +39,7 @@
 #include "VideoCommon/PixelShaderManager.h"
 #include "VideoCommon/Statistics.h"
 #include "VideoCommon/TextureCacheBase.h"
+#include "VideoCommon/ThreeDScreenshot.h"
 #include "VideoCommon/VertexLoaderManager.h"
 #include "VideoCommon/VertexShaderManager.h"
 #include "VideoCommon/VideoBackendBase.h"
@@ -47,6 +51,272 @@
 std::unique_ptr<VertexManagerBase> g_vertex_manager;
 
 using OpcodeDecoder::Primitive;
+
+namespace
+{
+constexpr u16 PRIMITIVE_RESTART_INDEX = 0xffff;
+constexpr float CLIP_EPSILON = 1.0e-6f;
+
+struct ThreeDScreenshotClipVertex
+{
+  ThreeDScreenshot::Vertex vertex;
+  Common::Vec4 clip;
+};
+
+template <typename T, typename I>
+T ReadNormalized3DScreenshotAttribute(I value)
+{
+  T casted = static_cast<T>(value);
+  if constexpr (!std::numeric_limits<T>::is_integer && std::numeric_limits<I>::is_integer)
+    casted *= static_cast<T>(1.0 / std::numeric_limits<I>::max());
+  return casted;
+}
+
+template <typename T>
+T Read3DScreenshotAttributeComponent(const u8* vertex, const AttributeFormat& format,
+                                     int component, T fallback)
+{
+  if (!format.enable || component >= format.components)
+    return fallback;
+
+  const u8* src = vertex + format.offset + component * GetElementSize(format.type);
+  switch (format.type)
+  {
+  case ComponentFormat::UByte:
+    return ReadNormalized3DScreenshotAttribute<T>(*src);
+  case ComponentFormat::Byte:
+    return ReadNormalized3DScreenshotAttribute<T>(*reinterpret_cast<const s8*>(src));
+  case ComponentFormat::UShort:
+    return ReadNormalized3DScreenshotAttribute<T>(*reinterpret_cast<const u16*>(src));
+  case ComponentFormat::Short:
+    return ReadNormalized3DScreenshotAttribute<T>(*reinterpret_cast<const s16*>(src));
+  case ComponentFormat::Float:
+  case ComponentFormat::InvalidFloat5:
+  case ComponentFormat::InvalidFloat6:
+  case ComponentFormat::InvalidFloat7:
+    return ReadNormalized3DScreenshotAttribute<T>(*reinterpret_cast<const float*>(src));
+  }
+
+  return fallback;
+}
+
+float ReadFloatAttribute(const u8* vertex, const AttributeFormat& format, int component,
+                         float fallback = 0.0f)
+{
+  return Read3DScreenshotAttributeComponent(vertex, format, component, fallback);
+}
+
+u8 ReadU8Attribute(const u8* vertex, const AttributeFormat& format, int component, u8 fallback = 0)
+{
+  return Read3DScreenshotAttributeComponent(vertex, format, component, fallback);
+}
+
+u32 ReadPositionMatrixIndex(const u8* vertex, const PortableVertexDeclaration& decl)
+{
+  if (decl.posmtx.enable)
+    return ReadU8Attribute(vertex, decl.posmtx, 0);
+
+  return g_main_cp_state.matrix_index_a.PosNormalMtxIdx;
+}
+
+Common::Vec3 TransformPositionToViewSpace(const Common::Vec3& position, u32 matrix_index)
+{
+  const float* matrix = &xfmem.posMatrices[(matrix_index & 0x3f) * 4];
+  return {position.x * matrix[0] + position.y * matrix[1] + position.z * matrix[2] + matrix[3],
+          position.x * matrix[4] + position.y * matrix[5] + position.z * matrix[6] + matrix[7],
+          position.x * matrix[8] + position.y * matrix[9] + position.z * matrix[10] + matrix[11]};
+}
+
+Common::Vec3 TransformNormalToViewSpace(const Common::Vec3& normal, u32 matrix_index)
+{
+  const float* matrix = &xfmem.normalMatrices[(matrix_index & 31) * 3];
+  return {normal.x * matrix[0] + normal.y * matrix[1] + normal.z * matrix[2],
+          normal.x * matrix[3] + normal.y * matrix[4] + normal.z * matrix[5],
+          normal.x * matrix[6] + normal.y * matrix[7] + normal.z * matrix[8]};
+}
+
+ThreeDScreenshotClipVertex Make3DScreenshotVertex(const u8* vertex,
+                                                  const PortableVertexDeclaration& decl)
+{
+  const u32 matrix_index = ReadPositionMatrixIndex(vertex, decl);
+  const Common::Vec3 position = {ReadFloatAttribute(vertex, decl.position, 0),
+                                 ReadFloatAttribute(vertex, decl.position, 1),
+                                 ReadFloatAttribute(vertex, decl.position, 2)};
+  const Common::Vec3 normal = {ReadFloatAttribute(vertex, decl.normals[0], 0),
+                               ReadFloatAttribute(vertex, decl.normals[0], 1),
+                               ReadFloatAttribute(vertex, decl.normals[0], 2, 1.0f)};
+
+  ThreeDScreenshotClipVertex screenshot_vertex;
+  screenshot_vertex.vertex.position = TransformPositionToViewSpace(position, matrix_index);
+  float clip[4];
+  Core::System::GetInstance().GetVertexShaderManager().TransformToClipSpace(&position.x, clip,
+                                                                            matrix_index);
+  screenshot_vertex.clip = {clip[0], clip[1], clip[2], clip[3]};
+  screenshot_vertex.vertex.normal =
+      decl.normals[0].enable ? TransformNormalToViewSpace(normal, matrix_index) : normal;
+  screenshot_vertex.vertex.texcoord = {ReadFloatAttribute(vertex, decl.texcoords[0], 0),
+                                       ReadFloatAttribute(vertex, decl.texcoords[0], 1)};
+  screenshot_vertex.vertex.color = {ReadU8Attribute(vertex, decl.colors[0], 0, 255),
+                                    ReadU8Attribute(vertex, decl.colors[0], 1, 255),
+                                    ReadU8Attribute(vertex, decl.colors[0], 2, 255),
+                                    ReadU8Attribute(vertex, decl.colors[0], 3, 255)};
+  return screenshot_vertex;
+}
+
+ThreeDScreenshotClipVertex Interpolate3DScreenshotVertex(const ThreeDScreenshotClipVertex& a,
+                                                         const ThreeDScreenshotClipVertex& b,
+                                                         float t)
+{
+  ThreeDScreenshotClipVertex result;
+  result.clip = {a.clip.x + (b.clip.x - a.clip.x) * t, a.clip.y + (b.clip.y - a.clip.y) * t,
+                 a.clip.z + (b.clip.z - a.clip.z) * t, a.clip.w + (b.clip.w - a.clip.w) * t};
+  result.vertex.position = a.vertex.position + (b.vertex.position - a.vertex.position) * t;
+  result.vertex.normal = a.vertex.normal + (b.vertex.normal - a.vertex.normal) * t;
+  result.vertex.texcoord = a.vertex.texcoord + (b.vertex.texcoord - a.vertex.texcoord) * t;
+  for (std::size_t i = 0; i < result.vertex.color.size(); ++i)
+  {
+    const float color =
+        a.vertex.color[i] + (static_cast<float>(b.vertex.color[i]) - a.vertex.color[i]) * t;
+    result.vertex.color[i] = static_cast<u8>(std::clamp(color, 0.0f, 255.0f));
+  }
+  return result;
+}
+
+template <typename PlaneDistance>
+void Clip3DScreenshotPolygonToPlane(std::vector<ThreeDScreenshotClipVertex>* polygon,
+                                    PlaneDistance distance)
+{
+  if (polygon->empty())
+    return;
+
+  std::vector<ThreeDScreenshotClipVertex> output;
+  output.reserve(polygon->size() + 1);
+
+  ThreeDScreenshotClipVertex previous = polygon->back();
+  float previous_distance = distance(previous.clip);
+  bool previous_inside = previous_distance >= -CLIP_EPSILON;
+
+  for (const ThreeDScreenshotClipVertex& current : *polygon)
+  {
+    const float current_distance = distance(current.clip);
+    const bool current_inside = current_distance >= -CLIP_EPSILON;
+
+    if (current_inside != previous_inside)
+    {
+      const float denominator = previous_distance - current_distance;
+      if (std::abs(denominator) > CLIP_EPSILON)
+      {
+        const float t = previous_distance / denominator;
+        output.push_back(Interpolate3DScreenshotVertex(previous, current, t));
+      }
+    }
+
+    if (current_inside)
+      output.push_back(current);
+
+    previous = current;
+    previous_distance = current_distance;
+    previous_inside = current_inside;
+  }
+
+  *polygon = std::move(output);
+}
+
+void AddClipped3DScreenshotTriangle(const ThreeDScreenshotClipVertex& v0,
+                                    const ThreeDScreenshotClipVertex& v1,
+                                    const ThreeDScreenshotClipVertex& v2, u32 material_index)
+{
+  if (v0.clip.w <= CLIP_EPSILON && v1.clip.w <= CLIP_EPSILON && v2.clip.w <= CLIP_EPSILON)
+    return;
+
+  std::vector<ThreeDScreenshotClipVertex> polygon{v0, v1, v2};
+  Clip3DScreenshotPolygonToPlane(&polygon, [](const Common::Vec4& v) { return v.x + v.w; });
+  Clip3DScreenshotPolygonToPlane(&polygon, [](const Common::Vec4& v) { return v.w - v.x; });
+  Clip3DScreenshotPolygonToPlane(&polygon, [](const Common::Vec4& v) { return v.y + v.w; });
+  Clip3DScreenshotPolygonToPlane(&polygon, [](const Common::Vec4& v) { return v.w - v.y; });
+  Clip3DScreenshotPolygonToPlane(&polygon, [](const Common::Vec4& v) { return v.z + v.w; });
+  Clip3DScreenshotPolygonToPlane(&polygon, [](const Common::Vec4& v) { return v.w - v.z; });
+
+  if (polygon.size() < 3)
+    return;
+
+  for (std::size_t i = 1; i + 1 < polygon.size(); ++i)
+  {
+    ThreeDScreenshot::AddTriangle(polygon[0].vertex, polygon[i].vertex, polygon[i + 1].vertex,
+                                  material_index);
+  }
+}
+
+void Add3DScreenshotTriangle(const u8* vertex_buffer, const PortableVertexDeclaration& decl,
+                             u32 vertex_count, u32 material_index, u16 i0, u16 i1, u16 i2)
+{
+  if (i0 >= vertex_count || i1 >= vertex_count || i2 >= vertex_count)
+    return;
+
+  if (i0 == i1 || i1 == i2 || i0 == i2)
+    return;
+
+  const u8* v0 = vertex_buffer + i0 * decl.stride;
+  const u8* v1 = vertex_buffer + i1 * decl.stride;
+  const u8* v2 = vertex_buffer + i2 * decl.stride;
+  AddClipped3DScreenshotTriangle(Make3DScreenshotVertex(v0, decl),
+                                 Make3DScreenshotVertex(v1, decl),
+                                 Make3DScreenshotVertex(v2, decl), material_index);
+}
+
+void Capture3DScreenshotDraw(const u8* vertex_buffer, const PortableVertexDeclaration& decl,
+                             u32 vertex_count, u32 material_index, std::span<const u16> indices,
+                             PrimitiveType primitive_type)
+{
+  if (!ThreeDScreenshot::IsRequested() || !vertex_buffer || vertex_count == 0 || indices.empty() ||
+      decl.stride <= 0)
+    return;
+
+  if (xfmem.projection.type != ProjectionType::Perspective)
+    return;
+
+  switch (primitive_type)
+  {
+  case PrimitiveType::Triangles:
+    for (std::size_t i = 0; i + 2 < indices.size(); i += 3)
+      Add3DScreenshotTriangle(vertex_buffer, decl, vertex_count, material_index, indices[i],
+                              indices[i + 1], indices[i + 2]);
+    break;
+
+  case PrimitiveType::TriangleStrip:
+  {
+    u32 strip_vertex = 0;
+    u16 previous[2] = {};
+    for (const u16 index : indices)
+    {
+      if (index == PRIMITIVE_RESTART_INDEX)
+      {
+        strip_vertex = 0;
+        continue;
+      }
+
+      if (strip_vertex >= 2)
+      {
+        if (strip_vertex & 1)
+          Add3DScreenshotTriangle(vertex_buffer, decl, vertex_count, material_index, previous[1],
+                                  previous[0], index);
+        else
+          Add3DScreenshotTriangle(vertex_buffer, decl, vertex_count, material_index, previous[0],
+                                  previous[1], index);
+      }
+
+      previous[0] = previous[1];
+      previous[1] = index;
+      ++strip_vertex;
+    }
+    break;
+  }
+
+  default:
+    break;
+  }
+}
+}  // namespace
 
 // GX primitive -> RenderState primitive, no primitive restart
 constexpr Common::EnumMap<PrimitiveType, Primitive::GX_DRAW_POINTS> primitive_from_gx{
@@ -556,12 +826,14 @@ void VertexManagerBase::Flush()
     pixel_shader_manager.constants.time_ms = seconds_elapsed * 1000;
   }
 
-  CalculateNormals(VertexLoaderManager::GetCurrentVertexFormat());
+  NativeVertexFormat* vertex_format = VertexLoaderManager::GetCurrentVertexFormat();
+  CalculateNormals(vertex_format);
   // Calculate ZSlope for zfreeze
   const auto used_textures = UsedTextures();
   std::vector<std::string> texture_names;
   Common::SmallVector<u32, 8> texture_units;
   std::array<SamplerState, 8> samplers;
+  std::array<TCacheEntry*, 8> loaded_textures = {};
   if (!m_cull_all)
   {
     if (!g_ActiveConfig.bGraphicMods)
@@ -571,6 +843,7 @@ void VertexManagerBase::Flush()
         const auto cache_entry = g_texture_cache->Load(i);
         if (!cache_entry)
           continue;
+        loaded_textures[i] = cache_entry;
         const float custom_tex_scale = cache_entry->GetWidth() / float(cache_entry->native_width);
         samplers[i] = TextureCacheBase::GetSamplerState(
             i, custom_tex_scale, cache_entry->is_custom_tex, cache_entry->has_arbitrary_mips);
@@ -583,6 +856,7 @@ void VertexManagerBase::Flush()
         const auto cache_entry = g_texture_cache->Load(i);
         if (cache_entry)
         {
+          loaded_textures[i] = cache_entry;
           if (!Common::Contains(texture_names, cache_entry->texture_info_name))
           {
             texture_names.push_back(cache_entry->texture_info_name);
@@ -644,6 +918,30 @@ void VertexManagerBase::Flush()
 
     if (!skip)
     {
+      const PortableVertexDeclaration vertex_declaration = vertex_format->GetVertexDeclaration();
+      if (vertex_declaration.stride > 0)
+      {
+        u32 material_index = 0;
+        if (vertex_declaration.texcoords[0].enable && loaded_textures[0] &&
+            loaded_textures[0]->texture)
+        {
+          const std::string texture_name =
+              loaded_textures[0]->texture_info_name.empty() ?
+                  fmt::format("{:016x}_{:016x}", loaded_textures[0]->id, loaded_textures[0]->hash) :
+                  loaded_textures[0]->texture_info_name;
+          material_index =
+              ThreeDScreenshot::AddTextureMaterial(*loaded_textures[0]->texture, texture_name);
+        }
+
+        const u32 num_vertices = static_cast<u32>((m_cur_buffer_pointer - m_base_buffer_pointer) /
+                                                  vertex_declaration.stride);
+        Capture3DScreenshotDraw(m_base_buffer_pointer, vertex_declaration, num_vertices,
+                                material_index,
+                                std::span<const u16>(m_index_generator.GetIndexBufferStart(),
+                                                     num_indices),
+                                m_current_primitive_type);
+      }
+
       UpdatePipelineConfig();
       UpdatePipelineObject();
       if (m_current_pipeline_object)

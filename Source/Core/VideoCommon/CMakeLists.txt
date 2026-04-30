@@ -187,6 +187,8 @@ add_library(videocommon
   TextureDecoder_Util.h
   TextureInfo.cpp
   TextureInfo.h
+  ThreeDScreenshot.cpp
+  ThreeDScreenshot.h
   TextureUtils.cpp
   TextureUtils.h
   TMEM.cpp

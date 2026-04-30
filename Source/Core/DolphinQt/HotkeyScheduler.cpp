@@ -237,6 +237,9 @@ void HotkeyScheduler::Run()
       if (IsHotkey(HK_SCREENSHOT))
         emit ScreenShotHotkey();
 
+      if (IsHotkey(HK_3D_SCREENSHOT))
+        emit ThreeDScreenShotHotkey();
+
       // Unlock Cursor
       if (IsHotkey(HK_UNLOCK_CURSOR))
         emit UnlockCursor();

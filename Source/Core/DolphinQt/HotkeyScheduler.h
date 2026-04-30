@@ -34,6 +34,7 @@ signals:
   void ResetHotkey();
   void TogglePauseHotkey();
   void ScreenShotHotkey();
+  void ThreeDScreenShotHotkey();
   void RefreshGameListHotkey();
   void SetStateSlotHotkey(int slot);
   void IncrementSelectedStateSlotHotkey();
